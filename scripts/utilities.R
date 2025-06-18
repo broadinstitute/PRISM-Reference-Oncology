@@ -222,6 +222,68 @@ get_best_fit <- function(FC, dose, UL_low=0.8, UL_up=1.01, slope_decreasing=TRUE
 
 
 
+#' Computing area under a 4 parameter log-logistic dose response curve
+#'
+#' @param LL : Lower asymptote
+#' @param UL : Upper asymptote
+#' @param inflection : inflection point (EC50)
+#' @param slope : Hill slope ( > 0 for decreasing curves)
+#' @param minimum_dose : Minimum dose
+#' @param maximum_dose : Maximum dose
+#'
+#' @return auc value of the dose-response function (x: log2(dose), y: response) scaled to the dose range.
+#' @export
+#'
+#' @examples
+compute_auc <- function(LL, UL, inflection, slope, minimum_dose, maximum_dose) {
+  f1 = function(x) pmax(pmin((UL + (LL - UL)/(1 + (2^x/inflection)^slope)), 1, na.rm = T), 0, na.rm = T)
+  return(tryCatch(integrate(f1, log2(minimum_dose), log2(maximum_dose))$value/(log2(maximum_dose/minimum_dose)),
+                  error = function(e) {print(e); NA}))
+}
+
+
+#' Computing IC50 for a 4 parameter log-logistic dose response curve
+#'
+#' @param LL : Lower asymptote
+#' @param UL : Upper asymptote
+#' @param inflection : inflection point (EC50)
+#' @param slope : Hill slope ( > 0 for decreasing curves)
+#' @param minimum_dose : Minimum dose
+#' @param maximum_dose : Maximum dose
+#'
+#' @return IC50 : The dose value where the curve intersects with y = 0.5, NA returned if they don't intersect in the given dose range.
+#' @export
+#'
+#' @examples
+compute_log_ic50 <- function(LL, UL, inflection, slope, minimum_dose, maximum_dose) {
+  if((LL >= 0.5) | (UL <= 0.5)) {
+    return(NA)
+  } else {
+    f1 = function(x) (UL + (LL - UL)/(1 + (2^x/inflection)^slope)- 0.5)
+    return(tryCatch(uniroot(f1, c(log2(minimum_dose), log2(maximum_dose)))$root,  error = function(x) NA))
+  }
+}
+
+#' Computing mean square and median absolute errors for for a 4 parameter log-logistic dose response curve and the corresponding (dose,viability) pairs.
+#'
+#' @param FC : Measured viability vector
+#' @param dose : Dose vector corresponding to FC
+#' @param UL : Upper asymptote
+#' @param LL : Lower asymptote
+#' @param slope : Hill slope
+#' @param inflection : inflection point (EC50)
+#'
+#' @return List of mse and mad values.
+#' @export
+#'
+#' @examples
+compute_mse_mad <- function(FC, dose,  UL, LL,  slope, inflection) {
+  FC.pred = UL  + (LL -UL )/(1 + (dose/inflection)^slope)
+  residuals = FC - FC.pred
+  return(list(mse = mean(residuals^2), mad = median(abs(residuals))))
+}
+
+
 
 #' Fits a simple linear model by regressing y over each column of X.
 #'

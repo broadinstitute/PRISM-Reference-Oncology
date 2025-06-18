@@ -106,7 +106,6 @@ lmfi <- lmfi %>%
   dplyr::left_join(lmfi)
 
 
-
 # ----
 # COMPUTE THE REFERENCE VALUES FOR CONTROL BARCODES
 # ----
@@ -123,8 +122,6 @@ REF = lmfi %>%
   dplyr::group_by(prism_replicate, analyte_id) %>%
   dplyr::summarise(LMFI.ref = median(LMFI.NF, na.rm = T)) %>% 
   dplyr::ungroup()
-
-
 
 # ----
 # NORMALIZE USING SPLINE FITS
@@ -167,9 +164,6 @@ for (profile in profiles) {
 lmfi.normalized %<>% dplyr::bind_rows()
 
 rm(REF, temp, p, g, ix, profile, profiles)
-
-
-
 
 # ----
 # FILTERING OUTLIER NEGATIVE CONTROL POOLS AND ALIGN THE REPLICATES
@@ -253,7 +247,6 @@ QC = lmfi.normalized %>%
 QC %>% 
   write_csv("data/25Q2/PRISMOncologyReferenceQCTable.csv")
 
-
 # ----
 # COMPUTE LOG-FOLD-CHANGES
 # ----
@@ -262,7 +255,6 @@ LFC <- lmfi.normalized %>%
   dplyr::inner_join(QC %>% dplyr::select(analyte_id, pool_id, prism_replicate, NC.median, PASS)) %>%
   dplyr::mutate(LFC = LMFI.normalized.corrected - NC.median) %>%
   dplyr::distinct(prism_replicate, pert_well, analyte_id, cellset, pool_id, screen, LFC, PASS) 
-
 
 # ----
 # CORRECT FOR POOL EFFECTS FOR TREATMENTS 
@@ -414,8 +406,6 @@ for(ix in 1:nrow(CompoundPlates)){
 
 DRC <- bind_rows(DRC)
 
-
-
 DRC %<>% 
   dplyr::left_join(analyte_meta) %>% 
   dplyr::mutate(note = ifelse(is.na(note), "", note)) %>% 
@@ -429,8 +419,6 @@ DRC %<>%
 
 DRC %>% 
   write_csv("data/25Q2/PRISMOncologyReferenceDoseResponseParameters.csv")
-
-
 
 # ----
 # CALCULATE THE FITTED LFC VALUES
@@ -446,16 +434,12 @@ LFC.fitted <- inst_meta %>%
   dplyr::mutate(LFC_fitted = log2(lower_limit + (upper_limit - lower_limit) / (1 + (pert_dose / inflection)^-slope))) %>% 
   dplyr::distinct(screen, CompoundPlate, SampleID, pert_dose, pert_dose_unit, cellset, depmap_id, pool_id, LFC_fitted, priority)
 
-
 LFC.collapsed %<>% 
   dplyr::full_join(LFC.fitted) 
-
-
 
 LFC.collapsed %>%  
   dplyr::distinct(screen, CompoundPlate, SampleID, pert_dose, pert_dose_unit, cellset, pool_id, depmap_id, LFC, LFC_fitted, outlier, priority) %>%
   write_csv("data/25Q2/PRISMOncologyReferenceLFCCollapsed.csv")
-
 
 # -----
 # WRITE PORTAL FILES
@@ -561,9 +545,3 @@ conf.pools %>%
                      reshape2::melt()) %>% 
   reshape2::acast(Var1 ~ Var2)  %>% 
   write.csv("data/25Q2/PRISMOncologyReferenceConfounderMatrix.csv")
-
-
-
-
-
-
