@@ -4,13 +4,14 @@ library(scam)
 library(parallel)
 source("scripts/utilities.R")
 
+
 #----
 # LOAD THE RAW DATA
 #----
-compound_annotations <- data.table::fread("data/25Q2/PRISMOncologyReferenceCompoundList.csv")
-inst_meta <- data.table::fread("data/25Q2/PRISMOncologyReferenceInstMeta.csv")
-analyte_meta <- data.table::fread("data/25Q2/PRISMOncologyReferenceAnalyteMeta.csv")
-lmfi <- data.table::fread("data/25Q2/PRISMOncologyReferenceLMFI.csv")
+
+inst_meta <- data.table::fread("data/25Q4/PRISMOncologyReferenceLumInstMeta.csv")
+analyte_meta <- data.table::fread("data/25Q4/PRISMOncologyReferenceLumAnalyteMeta.csv")
+lmfi <- data.table::fread("data/25Q4/PRISMOncologyReferenceLumLMFI.csv")
 
 # -----
 # FILTER WELLS AND ANALYTES WITH LOW BEAD-COUNTS
@@ -33,7 +34,7 @@ NoiseFloorEstimates <- lmfi %>%
 
 
 
-# Remove low bead-count or too dim points and correct for the background flourescence.
+# Remove low bead-count or too dim points and correct for the background fluorescence.
 lmfi <- lmfi %>%  
   dplyr::left_join(analyte_meta) %>% 
   dplyr::filter(!is.na(pool_id))%>% 
@@ -93,7 +94,7 @@ rm(CB.quantiles)
 
 
 # ------
-# DROP PLATES THAT DOESN'T HAVE AT LEAST 16 NEGCON WELLS
+# DROP PLATES THAT DOESN'T HAVE AT LEAST 16 NEGCON WELLS 
 # ------
 
 lmfi <- lmfi %>%
@@ -107,7 +108,7 @@ lmfi <- lmfi %>%
 
 
 # ----
-# COMPUTE THE REFERENCE VALUES FOR CONTROL BARCODES
+# COMPUTE THE REFERENCE VALUES FOR CONTROL BARCODES 
 # ----
 
 REF = lmfi %>%  
@@ -124,7 +125,7 @@ REF = lmfi %>%
   dplyr::ungroup()
 
 # ----
-# NORMALIZE USING SPLINE FITS
+# NORMALIZE USING SPLINE FITS 
 # ----
 
 lmfi %<>%
@@ -166,7 +167,7 @@ lmfi.normalized %<>% dplyr::bind_rows()
 rm(REF, temp, p, g, ix, profile, profiles)
 
 # ----
-# FILTERING OUTLIER NEGATIVE CONTROL POOLS AND ALIGN THE REPLICATES
+# FILTERING OUTLIER NEGATIVE CONTROL POOLS AND ALIGN THE REPLICATES 
 # ----
 
 outlier.nc.pools <- lmfi.normalized %>% 
@@ -216,7 +217,7 @@ lmfi.normalized <- lmfi.normalized %>%
 
 
 # ----
-# QC TABLE
+# QC TABLE 
 # ----
 
 QC = lmfi.normalized %>%
@@ -245,10 +246,11 @@ QC = lmfi.normalized %>%
   dplyr::ungroup()
 
 QC %>% 
-  write_csv("data/25Q2/PRISMOncologyReferenceQCTable.csv")
+  write_csv("data/25Q4/PRISMOncologyReferenceLumQCTable.csv")
+
 
 # ----
-# COMPUTE LOG-FOLD-CHANGES
+# COMPUTE LOG-FOLD-CHANGES 
 # ----
 
 LFC <- lmfi.normalized %>%  
@@ -274,29 +276,81 @@ LFC <- LFC %>%
   dplyr::left_join(trt.pool.corrections %>%
                      dplyr::distinct(pert_well, prism_replicate, pool_id, delta)) %>% 
   dplyr::mutate(delta = ifelse(is.finite(delta), delta,0)) %>% 
-  dplyr::mutate(LFC_corrected =  LFC + delta) %>% 
-  dplyr::distinct(prism_replicate, pert_well, analyte_id, cellset, pool_id, screen, LFC, LFC_corrected, PASS)
+  dplyr::mutate(LFC =  LFC + delta) %>% 
+  dplyr::distinct(prism_replicate, pert_well, analyte_id, cellset, pool_id, screen, LFC, PASS)
+
+# ----
+# CORRECT FOR CELL LINE CHARACTERISTICS 
+# ---- 
+
+
+f <- function(df){
+  df <- df %>% 
+    dplyr::filter(is.finite(LFC), is.finite(NC.median), !is.na(cellset), !is.na(growth_pattern)) %>% 
+    dplyr::mutate(m = mean(LFC), 
+                  y = LFC - m,
+                  growth_pattern = ifelse(growth_pattern == "Suspension", "S", "A"))
+  
+  if(length(unique(df$cellset)) > 1){
+    if(length(unique(df$growth_pattern)) > 1){
+      fit <- lm(y ~ growth_pattern + cellset * NC.median, data = df)
+      
+    }else{
+      fit <- lm(y ~ cellset * NC.median, data = df)
+    }
+  }else{
+    if(length(unique(df$growth_pattern)) > 1){
+      fit <- lm(y ~ growth_pattern + NC.median, data = df)
+    }else{
+      fit <- lm(y ~  NC.median, data = df)
+    }
+  }
+  df$LFC_corrected  = fit$residuals + df$m
+  
+  df %>% 
+    dplyr::distinct(prism_replicate, pert_well, pool_id, analyte_id, cellset, screen, LFC_corrected)
+}
+
+
+
+LFC.adj <- LFC %>% 
+  dplyr::left_join(QC %>% 
+                     dplyr::distinct(prism_replicate, cellset, analyte_id, DR, NC.median)) %>% 
+  dplyr::filter(PASS) %>%
+  dplyr::left_join(inst_meta) %>% 
+  dplyr::filter(pert_type == "trt_cp") %>%
+  dplyr::left_join(analyte_meta) %>% 
+  dplyr::group_split(CompoundPlate, replicate, SampleID, pert_dose) %>%
+  lapply(f) %>% 
+  dplyr::bind_rows() %>% 
+  dplyr::ungroup()
+
+LFC %<>% 
+  dplyr::left_join(LFC.adj) %>%
+  dplyr::rename(LFC_uncorrected = LFC, LFC = LFC_corrected)
 
 LFC %>% 
-  dplyr::distinct(prism_replicate, pert_well, analyte_id, cellset, screen, LFC, LFC_corrected, PASS) %>% 
-  write_csv("data/25Q2/PRISMOncologyReferenceLFC.csv")
+  write_csv("data/25Q4/PRISMOncologyReferenceLumLFC.csv")
+
 
 # ----
 # COLLAPSE REPLICATES 
 # ----
 
 LFC.collapsed <- LFC %>% 
-  dplyr::filter(PASS) %>% 
+  dplyr::filter(PASS,  is.finite(LFC)) %>% 
   dplyr::left_join(inst_meta) %>% 
   dplyr::left_join(analyte_meta) %>% 
-  dplyr::filter(pert_type == "trt_cp", !is.na(depmap_id), pool_id != "CTLBC", is.finite(LFC)) %>%  
+  dplyr::filter(pert_type == "trt_cp", !is.na(depmap_id), pool_id != "CTLBC") %>%  
   dplyr::group_by(CompoundPlate, SampleID, pert_dose, pert_dose_unit, cellset, pool_id, depmap_id) %>% 
   dplyr::filter(n() > 1) %>% 
-  dplyr::summarise(LFC = median(LFC_corrected, na.rm = T)) %>% 
+  dplyr::summarise(LFC_uncorrected = median(LFC_uncorrected, na.rm = T), 
+                   LFC = median(LFC, na.rm = T)) %>% 
   dplyr::ungroup()
 
+
 # ----
-# FLAG AND FILTER OUTLIER TREATMENT WELLS
+# FLAG AND FILTER OUTLIER TREATMENT WELLS 
 # ----
 
 dose_indices <- inst_meta %>% 
@@ -308,18 +362,23 @@ dose_indices <- inst_meta %>%
   dplyr::ungroup()
 
 
-monotonicity_flags <- dose_indices %>% 
+dose_indices %<>% 
   dplyr::left_join(dose_indices %>% 
                      dplyr::rename(pert_dose.prev = pert_dose) %>% 
                      dplyr::mutate(dose_ix = dose_ix + 1)) %>%   
   dplyr::left_join(dose_indices %>% 
                      dplyr::rename(pert_dose.next = pert_dose) %>% 
                      dplyr::mutate(dose_ix = dose_ix - 1)) %>%   
-  dplyr::select(-dose_ix) %>% 
-  dplyr::left_join(LFC.collapsed) %>%  
-  dplyr::left_join(LFC.collapsed %>% 
+  dplyr::select(-dose_ix)
+  
+temp <- LFC.collapsed %>% 
+  dplyr::select(-LFC_uncorrected)
+  
+outlier.trt.pools <- dose_indices %>% 
+  dplyr::left_join(temp) %>%  
+  dplyr::left_join(temp %>% 
                      dplyr::rename(pert_dose.prev = pert_dose,  LFC.prev = LFC)) %>%  
-  dplyr::left_join(LFC.collapsed %>% 
+  dplyr::left_join(temp %>% 
                      dplyr::rename(pert_dose.next = pert_dose,  LFC.next = LFC)) %>%  
   dplyr::mutate(flag.down = LFC < -2, flag.up =  LFC > -1,
                 flag.down.prev = ifelse(is.na(pert_dose.prev), FALSE, LFC.prev < -2), 
@@ -327,10 +386,7 @@ monotonicity_flags <- dose_indices %>%
                 flag.down.next = ifelse(is.na(pert_dose.next), TRUE, LFC.next < -2),
                 flag.up.next =  ifelse(is.na(pert_dose.next), FALSE, LFC.next > -1)) %>% 
   dplyr::mutate(flag1 = flag.down & flag.up.next & flag.up.prev,
-                flag2 = flag.up & flag.down.next & flag.down.prev)
-
-
-outlier.trt.pools <- monotonicity_flags %>% 
+                flag2 = flag.up & flag.down.next & flag.down.prev) %>% 
   dplyr::group_by(CompoundPlate, SampleID, pert_dose, cellset, pool_id) %>% 
   dplyr::summarise(n.f1 = mean(flag1, na.rm = T),
                    n.f2 = mean(flag2, na.rm = T)) %>% 
@@ -339,40 +395,72 @@ outlier.trt.pools <- monotonicity_flags %>%
   dplyr::distinct(CompoundPlate, SampleID, pert_dose, cellset, pool_id) %>% 
   dplyr::mutate(outlier = TRUE)
 
+temp <- LFC.collapsed %>% 
+  dplyr::select(-LFC) %>% 
+  dplyr::rename(LFC = LFC_uncorrected)
+ 
+outlier.trt.pools.uncorrected <- dose_indices %>% 
+  dplyr::left_join(temp) %>%  
+  dplyr::left_join(temp %>% 
+                     dplyr::rename(pert_dose.prev = pert_dose,  LFC.prev = LFC)) %>%  
+  dplyr::left_join(temp %>% 
+                     dplyr::rename(pert_dose.next = pert_dose,  LFC.next = LFC)) %>%  
+  dplyr::mutate(flag.down = LFC < -2, flag.up =  LFC > -1,
+                flag.down.prev = ifelse(is.na(pert_dose.prev), FALSE, LFC.prev < -2), 
+                flag.up.prev =  ifelse(is.na(pert_dose.prev), TRUE, LFC.prev > -1),
+                flag.down.next = ifelse(is.na(pert_dose.next), TRUE, LFC.next < -2),
+                flag.up.next =  ifelse(is.na(pert_dose.next), FALSE, LFC.next > -1)) %>% 
+  dplyr::mutate(flag1 = flag.down & flag.up.next & flag.up.prev,
+                flag2 = flag.up & flag.down.next & flag.down.prev) %>% 
+  dplyr::group_by(CompoundPlate, SampleID, pert_dose, cellset, pool_id) %>% 
+  dplyr::summarise(n.f1 = mean(flag1, na.rm = T),
+                   n.f2 = mean(flag2, na.rm = T)) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::filter(pmax(n.f1, n.f2) > 0.25) %>% 
+  dplyr::distinct(CompoundPlate, SampleID, pert_dose, cellset, pool_id) %>% 
+  dplyr::mutate(outlier_uncorrected = TRUE)
 
 
 LFC.collapsed %<>% 
+  dplyr::left_join(outlier.trt.pools.uncorrected) %>% 
   dplyr::left_join(outlier.trt.pools) %>% 
-  dplyr::mutate(outlier = !is.na(outlier))
+  dplyr::mutate(outlier = !is.na(outlier),
+                outlier_uncorrected = !is.na(outlier_uncorrected))
 
 
 LFC %<>%  
   dplyr::left_join(inst_meta) %>%
+  dplyr::left_join(outlier.trt.pools.uncorrected) %>% 
   dplyr::left_join(outlier.trt.pools) %>% 
-  dplyr::distinct(prism_replicate, pert_well, analyte_id, cellset, screen, LFC, LFC_corrected, PASS, outlier) %>% 
-  dplyr::mutate(outlier = !is.na(outlier))
+  dplyr::mutate(outlier = !is.na(outlier),
+                outlier_uncorrected = !is.na(outlier_uncorrected)) %>% 
+  dplyr::distinct(prism_replicate, pert_well, analyte_id, pool_id, cellset, screen, LFC, LFC_uncorrected, PASS, outlier, outlier_uncorrected) 
 
 
+
+# Maybe skip this file! 
 outlier.trt.pools %>% 
   dplyr::left_join(inst_meta) %>% 
-  dplyr::mutate(outlier_type = "trt") %>% 
+  dplyr::mutate(outlier_type = "trt") %>%  
   dplyr::bind_rows(outlier.nc.pools %>%
                      dplyr::left_join(inst_meta) %>% 
                      dplyr::mutate(outlier_type = "nc")) %>% 
   dplyr::distinct(screen, CompoundPlate, prism_replicate, pert_well, pool_id, outlier_type) %>% 
-  write_csv("data/25Q2/PRISMOncologyReferenceFilteredPools.csv")
+  write_csv("data/25Q4/PRISMOncologyReferenceLumFilteredPools.csv")
+
 
 
 # -------
 # FITTING DOSE RESPONSE CURVES 
 # ------
 
+
 LFC.FILTERED <- LFC %>%
   dplyr::left_join(inst_meta) %>%
   dplyr::left_join(analyte_meta) %>% 
-  dplyr::filter(is.finite(LFC_corrected), PASS, !outlier, pool_id != "CTLBC", pert_type == "trt_cp") %>%
+  dplyr::filter(is.finite(LFC), PASS, !outlier, pool_id != "CTLBC", pert_type == "trt_cp") %>%
   dplyr::group_by(CompoundPlate, SampleID, pert_dose, analyte_id, depmap_id, pool_id, cellset) %>%
-  dplyr::filter(abs(pmin(2^LFC_corrected, 1.5) - median(pmin(2^LFC_corrected, 1.5))) < 0.75) %>%
+  dplyr::filter(abs(pmin(2^LFC, 1.5) - median(pmin(2^LFC, 1.5))) < 0.75) %>%
   dplyr::group_by(CompoundPlate, SampleID, analyte_id, cellset) %>%
   dplyr::filter(length(unique(pert_dose)) > 4, n() > 12) %>%
   dplyr::ungroup()
@@ -384,11 +472,12 @@ CompoundPlates <- dplyr::distinct(LFC.FILTERED, SampleID, CompoundPlate) %>%
 f <- function(df){
   df %>% 
     dplyr::group_by(SampleID, CompoundPlate, analyte_id, depmap_id, pool_id, cellset, screen) %>%    
-    dplyr::summarise(get_best_fit(pmin(2^LFC_corrected,1.5), pert_dose)) %>%
+    dplyr::summarise(get_best_fit(pmin(2^LFC,1.5), pert_dose)) %>%
     dplyr::ungroup()
 }
 
-DRC <- list()
+
+DRC <- list() 
 time = Sys.time()
 for(ix in 1:nrow(CompoundPlates)){
   
@@ -399,11 +488,10 @@ for(ix in 1:nrow(CompoundPlates)){
   DRC[[ix]] <- CompoundPlates[ix, ] %>% 
     dplyr::select(-n) %>% 
     dplyr::left_join(LFC.FILTERED) %>% 
-    dplyr::group_split(SampleID) %>% 
-    parallel::mclapply(f, mc.cores = parallel::detectCores() - 1) %>%
+    dplyr::group_split(SampleID) %>%  
+    parallel::mclapply(f, mc.cores = parallel::detectCores() - 2) %>% # ! 
     dplyr::bind_rows()
 }
-
 DRC <- bind_rows(DRC)
 
 DRC %<>% 
@@ -417,17 +505,75 @@ DRC %<>%
   dplyr::select(-note)
 
 
+
+# FIT DOSE RESPONSE CURVES FOR NON-ADJUSTED LFC VALUES 
+
+LFC.FILTERED <- LFC %>%
+  dplyr::left_join(inst_meta) %>%
+  dplyr::left_join(analyte_meta) %>% 
+  dplyr::filter(is.finite(LFC_uncorrected), PASS, !outlier_uncorrected, pool_id != "CTLBC", pert_type == "trt_cp") %>%
+  dplyr::group_by(CompoundPlate, SampleID, pert_dose, analyte_id, depmap_id, pool_id, cellset) %>%
+  dplyr::filter(abs(pmin(2^LFC_uncorrected, 1.5) - median(pmin(2^LFC_uncorrected, 1.5))) < 0.75) %>%
+  dplyr::group_by(CompoundPlate, SampleID, analyte_id, cellset) %>%
+  dplyr::filter(length(unique(pert_dose)) > 4, n() > 12) %>%
+  dplyr::ungroup()
+
+CompoundPlates <- dplyr::distinct(LFC.FILTERED, SampleID, CompoundPlate) %>% 
+  dplyr::count(CompoundPlate) %>% 
+  dplyr::arrange(n)
+
+f <- function(df){
+  df %>% 
+    dplyr::group_by(SampleID, CompoundPlate, analyte_id, depmap_id, pool_id, cellset, screen) %>%    
+    dplyr::summarise(get_best_fit(pmin(2^LFC_uncorrected, 1.5), pert_dose)) %>%
+    dplyr::ungroup()
+}
+
+
+
+DRC.uncorrected <- list() 
+time = Sys.time()
+for(ix in 1:nrow(CompoundPlates)){
+  
+  print(CompoundPlates[ix, ])
+  print(Sys.time() - time)
+  time = Sys.time()
+  
+  DRC.uncorrected[[ix]] <- CompoundPlates[ix, ] %>% 
+    dplyr::select(-n) %>% 
+    dplyr::left_join(LFC.FILTERED) %>% 
+    dplyr::group_split(SampleID) %>%  
+    parallel::mclapply(f, mc.cores = parallel::detectCores() - 2) %>% 
+    dplyr::bind_rows()
+}
+
+
+DRC.uncorrected %<>% 
+  dplyr::bind_rows() %>% 
+  dplyr::left_join(analyte_meta) %>% 
+  dplyr::mutate(note = ifelse(is.na(note), "", note)) %>% 
+  dplyr::filter(note != "REMOVE") %>% 
+  dplyr::group_by(CompoundPlate, SampleID, depmap_id) %>% 
+  dplyr::arrange(!is.finite(auc), note == "DEPRIORITIZE", desc(cellset)) %>% 
+  dplyr::mutate(priority = 1:n()) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::select(-note)
+
+
+
+DRC <- DRC %>% 
+  dplyr::mutate(response = "corrected") %>% 
+  dplyr::bind_rows(DRC.uncorrected %>% 
+                     dplyr::mutate(response = "uncorrected")) 
+
+
 DRC %>% 
-  write_csv("data/25Q2/PRISMOncologyReferenceDoseResponseParameters.csv")
-
-
-
+  write_csv("data/25Q4/PRISMOncologyReferenceLumDoseResponseParameters.csv")
 
 
 # ----
-# CALCULATE THE FITTED LFC VALUES
+# CALCULATE THE FITTED LFC VALUES 
 # ----
-
 LFC.fitted <- inst_meta %>% 
   dplyr::filter(pert_type == "trt_cp") %>% 
   dplyr::distinct(screen, CompoundPlate, SampleID, pert_dose, pert_dose_unit) %>%  
@@ -436,36 +582,84 @@ LFC.fitted <- inst_meta %>%
   dplyr::mutate(inflection = as.numeric(inflection)) %>% 
   # dplyr::left_join(analyte_meta) %>% 
   dplyr::mutate(LFC_fitted = log2(lower_limit + (upper_limit - lower_limit) / (1 + (pert_dose / inflection)^-slope))) %>% 
-  dplyr::distinct(screen, CompoundPlate, SampleID, pert_dose, pert_dose_unit, cellset, depmap_id, pool_id, LFC_fitted, priority)
+  dplyr::distinct(screen, CompoundPlate, SampleID, pert_dose, pert_dose_unit, cellset, depmap_id, pool_id, LFC_fitted, priority, response)
+
+
+LFC.fitted %<>% 
+  dplyr::filter(response == "corrected") %>% 
+  dplyr::select(-response) %>%  
+  dplyr::distinct() %>% 
+  dplyr::full_join(LFC.fitted %>% 
+                     dplyr::filter(response == "uncorrected") %>% 
+                     dplyr::rename(LFC_uncorrected_fitted = LFC_fitted,
+                                   priority_uncorrected = priority) %>% 
+                     dplyr::select(-response) %>%  
+                     dplyr::distinct() ) 
+
+
+  
+  
 
 LFC.collapsed %<>% 
   dplyr::full_join(LFC.fitted) 
 
+
 LFC.collapsed %>%  
-  dplyr::distinct(screen, CompoundPlate, SampleID, pert_dose, pert_dose_unit, cellset, pool_id, depmap_id, LFC, LFC_fitted, outlier, priority) %>%
-  write_csv("data/25Q2/PRISMOncologyReferenceLFCCollapsed.csv")
+  dplyr::distinct(screen, CompoundPlate, SampleID, pert_dose, pert_dose_unit, cellset, pool_id, depmap_id, LFC, LFC_uncorrected, 
+                  LFC_fitted, LFC_uncorrected_fitted, outlier, outlier_uncorrected, priority) %>%
+  write_csv("data/25Q4/PRISMOncologyReferenceLumLFCCollapsed.csv")
 
-# -----
-# WRITE PORTAL FILES
-# -----
 
-DRC <- data.table::fread("data/25Q2/PRISMOncologyReferenceDoseResponseParameters.csv")
+# ----
+# WRITE DEPMAP FILES 
+# ----
+
+compound_annotations <- data.table::fread("data/25Q4/PRISMOncologyReferenceLumCompoundList.csv")
+
+
 
 DRC %>% 
+  dplyr::filter(response == "corrected") %>% 
   dplyr::left_join(compound_annotations %>% dplyr::distinct(SampleID, CompoundPlate, Prioritized)) %>% 
   dplyr::filter(priority == 1, Prioritized, successful_fit) %>% 
   dplyr::rename(ModelID = depmap_id, EC50 = inflection, LowerAsymptote = lower_limit, UpperAsymptote = upper_limit, Slope = slope) %>% 
   dplyr::distinct(ModelID, SampleID, CompoundPlate, EC50, LowerAsymptote, UpperAsymptote, Slope) %>% 
-  write_csv("data/25Q2/PRISMOncologyReferenceResponseCurves.csv")
+  write_csv("data/25Q4/PRISMOncologyReferenceLumResponseCurves.csv")
+
+
 
 DRC %>% 
+  dplyr::filter(response == "corrected") %>% 
   dplyr::left_join(compound_annotations %>% dplyr::distinct(SampleID, CompoundPlate, Prioritized)) %>% 
   dplyr::filter(priority == 1, Prioritized, successful_fit) %>% 
   reshape2::acast(depmap_id ~ SampleID, value.var = "log2_auc") %>% 
-  write.csv("data/25Q2/PRISMOncologyReferenceLog2AUCMatrix.csv")
+  write.csv("data/25Q4/PRISMOncologyReferenceLumLog2AUCMatrix.csv")
+
+DRC %>% 
+  dplyr::filter(response == "corrected") %>% 
+  dplyr::left_join(compound_annotations %>% dplyr::distinct(SampleID, CompoundPlate, Prioritized)) %>% 
+  dplyr::filter(priority == 1, Prioritized, successful_fit) %>% 
+  reshape2::acast(depmap_id ~ SampleID, value.var = "auc") %>% 
+  write.csv("data/25Q4/PRISMOncologyReferenceLumAUCMatrix.csv")
 
 
-LFC.collapsed <- data.table::fread("data/25Q2/PRISMOncologyReferenceLFCCollapsed.csv")
+DRC %>% 
+  dplyr::filter(response == "uncorrected") %>% 
+  dplyr::left_join(compound_annotations %>% dplyr::distinct(SampleID, CompoundPlate, Prioritized)) %>% 
+  dplyr::filter(priority == 1, Prioritized, successful_fit) %>% 
+  reshape2::acast(depmap_id ~ SampleID, value.var = "log2_auc") %>% 
+  write.csv("data/25Q4/PRISMOncologyReferenceLumLog2AUCMatrixUncorrected.csv")
+
+DRC %>% 
+  dplyr::filter(response == "uncorrected") %>% 
+  dplyr::left_join(compound_annotations %>% dplyr::distinct(SampleID, CompoundPlate, Prioritized)) %>% 
+  dplyr::filter(priority == 1, Prioritized, successful_fit) %>% 
+  reshape2::acast(depmap_id ~ SampleID, value.var = "auc") %>% 
+  write.csv("data/25Q4/PRISMOncologyReferenceLumAUCMatrixUncorrected.csv")
+
+
+
+
 
 LFC.collapsed %>%
   dplyr::left_join(compound_annotations %>% dplyr::distinct(SampleID, CompoundName, CompoundPlate, Prioritized)) %>% 
@@ -475,7 +669,7 @@ LFC.collapsed %>%
   dplyr::rename(Dose = pert_dose, DoseUnit = pert_dose_unit) %>% 
   dplyr::distinct(Label, SampleID, Dose, DoseUnit, depmap_id, LFC_fitted) %>% 
   reshape2::acast(depmap_id ~ Label, value.var = "LFC_fitted") %>% 
-  write.csv("data/25Q2/PRISMOncologyReferenceLog2ViabilityCollapsedMatrix.csv")
+  write.csv("data/25Q4/PRISMOncologyReferenceLumLog2ViabilityCollapsedMatrix.csv")
 
 
 LFC.collapsed %>%
@@ -485,14 +679,33 @@ LFC.collapsed %>%
   dplyr::mutate(Label = paste0(CompoundName, " (", SampleID, ") @", pert_dose, " ", pert_dose_unit)) %>% 
   dplyr::rename(Dose = pert_dose, DoseUnit = pert_dose_unit) %>% 
   dplyr::distinct(Label, SampleID, Dose, DoseUnit) %>% 
-  write_csv("data/25Q2/PRISMOncologyReferenceLog2ViabilityCollapsedConditions.csv")
+  write_csv("data/25Q4/PRISMOncologyReferenceLumLog2ViabilityCollapsedConditions.csv")
 
 
 
-LFC <- data.table::fread("data/25Q2/PRISMOncologyReferenceLFC.csv")
+LFC.collapsed %>%
+  dplyr::left_join(compound_annotations %>% dplyr::distinct(SampleID, CompoundName, CompoundPlate, Prioritized)) %>% 
+  dplyr::filter(priority_uncorrected == 1, Prioritized, !outlier) %>% 
+  dplyr::distinct(depmap_id, SampleID, pert_dose, pert_dose_unit, LFC_uncorrected_fitted, CompoundName) %>% 
+  dplyr::mutate(Label = paste0(CompoundName, " (", SampleID, ") @", pert_dose, " ", pert_dose_unit)) %>% 
+  dplyr::rename(Dose = pert_dose, DoseUnit = pert_dose_unit) %>% 
+  dplyr::distinct(Label, SampleID, Dose, DoseUnit, depmap_id, LFC_uncorrected_fitted) %>% 
+  reshape2::acast(depmap_id ~ Label, value.var = "LFC_uncorrected_fitted") %>% 
+  write.csv("data/25Q4/PRISMOncologyReferenceLumLog2ViabilityCollapsedMatrixUncorrected.csv")
 
 
-LFC <- LFC.collapsed %>%
+LFC.collapsed %>%
+  dplyr::left_join(compound_annotations %>% dplyr::distinct(SampleID, CompoundName, CompoundPlate, Prioritized)) %>% 
+  dplyr::filter(priority_uncorrected == 1, Prioritized, !outlier) %>% 
+  dplyr::distinct(depmap_id, SampleID, pert_dose, pert_dose_unit, LFC_uncorrected_fitted, CompoundName) %>% 
+  dplyr::mutate(Label = paste0(CompoundName, " (", SampleID, ") @", pert_dose, " ", pert_dose_unit)) %>% 
+  dplyr::rename(Dose = pert_dose, DoseUnit = pert_dose_unit) %>% 
+  dplyr::distinct(Label, SampleID, Dose, DoseUnit) %>% 
+  write_csv("data/25Q4/PRISMOncologyReferenceLumLog2ViabilityCollapsedConditionsUncorrected.csv")
+
+
+
+LFC_ <- LFC.collapsed %>%
   dplyr::left_join(compound_annotations %>% dplyr::distinct(SampleID, CompoundName, CompoundPlate, Prioritized)) %>% 
   dplyr::filter(priority == 1, Prioritized, !outlier) %>% 
   dplyr::distinct(screen, CompoundPlate, SampleID, pert_dose, pert_dose_unit,
@@ -502,27 +715,34 @@ LFC <- LFC.collapsed %>%
   dplyr::distinct(prism_replicate, pert_well, analyte_id, cellset, screen, 
                   depmap_id, SampleID, pert_dose, pert_dose_unit, CompoundPlate) %>% 
   dplyr::left_join(LFC) %>% 
-  dplyr::filter(is.finite(LFC_corrected), PASS) %>% 
-  dplyr::distinct(depmap_id, SampleID, pert_dose, pert_dose_unit, CompoundPlate, LFC_corrected) %>% 
+  dplyr::filter(is.finite(LFC), PASS) %>% 
+  dplyr::distinct(depmap_id, SampleID, pert_dose, pert_dose_unit, CompoundPlate, LFC) %>% 
   dplyr::group_by(depmap_id, SampleID, pert_dose, pert_dose_unit, CompoundPlate) %>% 
   dplyr::mutate(Replicate = 1:n()) %>% 
   dplyr::ungroup() %>% 
   dplyr::rename(Dose = pert_dose, DoseUnit = pert_dose_unit) 
 
-LFC.conditions <- LFC %>% 
+
+LFC.conditions <- LFC_ %>% 
   dplyr::distinct(SampleID, Dose, DoseUnit, CompoundPlate, Replicate) %>% 
   dplyr::arrange(SampleID, CompoundPlate, Dose, DoseUnit, Replicate) %>% 
   dplyr::mutate(Label = 1:n() - 1) 
 
-
-LFC %>% 
+LFC_ %>% 
   dplyr::left_join(LFC.conditions) %>% 
-  dplyr::mutate(viability = pmin(2^LFC_corrected, 1.5)) %>% 
+  dplyr::mutate(viability = pmin(2^LFC, 1.5)) %>% 
   reshape2::acast(depmap_id ~ Label, value.var = "viability") %>%
-  write.csv("data/25Q2/PRISMOncologyReferenceViabilityMatrix.csv")
+  write.csv("data/25Q4/PRISMOncologyReferenceLumViabilityMatrix.csv")
 
 LFC.conditions %>% 
-  write_csv("data/25Q2/PRISMOncologyReferenceViabilityConditions.csv")
+  write_csv("data/25Q4/PRISMOncologyReferenceLumViabilityConditions.csv")
+
+
+
+
+
+
+
 
 
 conf.pools <- analyte_meta %>% 
@@ -539,7 +759,6 @@ conf.pools <- cbind(conf.pools, conf.pools.2[rownames(conf.pools), ])
 
 conf.pools <- conf.pools[, !duplicated(t(conf.pools))]
 
-QC <- data.table::fread("data/25Q2/PRISMOncologyReferenceQCTable.csv")
 
 conf.QC <- QC %>% 
   dplyr::inner_join(LFC.collapsed %>% 
@@ -555,6 +774,10 @@ conf.pools %>%
   dplyr::bind_rows(conf.QC %>% 
                      reshape2::melt()) %>% 
   reshape2::acast(Var1 ~ Var2)  %>% 
-  write.csv("data/25Q2/PRISMOncologyReferenceConfounderMatrix.csv")
+  write.csv("data/25Q4/PRISMOncologyReferenceLumConfounderMatrix.csv")
+
+
+
+
 
 
